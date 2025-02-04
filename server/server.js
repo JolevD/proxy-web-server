@@ -1,13 +1,62 @@
 import https from "https"
 import http from "http"
+import { LRUCache } from "lru-cache"
+import { createLogger, format, transports } from "winston"
 
-const cache = new Map() // Stores cached responses in memory.
+const logger = createLogger({
+    // defining logs
+    level: "info",
+
+    format: format.combine(
+        format.timestamp({ format: "YYYY-MM-DD HH:mm:ss" }), // tells the time of the log
+        format.json(), // tells the log
+        format.prettyPrint()
+    ),
+
+    //storing logs 
+    transports: [
+        new transports.File({
+            filename: 'proxy-server.log',
+            maxsize: 5 * 1024 * 1024 // 5MB max file size
+        }),
+
+        // show logs in console
+        new transports.Console({
+            format: format.combine(
+                format.colorize(),
+                format.simple()
+            )
+        })
+    ]
+})
+
+
+const options = {
+    max: 100,            // Maximum number of items in the cache
+    maxSize: 200 * 1024, // Maximum total size (in bytes)
+    sizeCalculation: (value, key) => {
+        return value.body.length; // Use the length of the body for size calculations
+    }
+}
+
+const cache = new LRUCache(options) // Stores cached responses in memory.
+
 const server = http.createServer((clientReq, clientRes) => {
-    console.log(`Received request: ${clientReq.method} ${clientReq.url}`);
+    // logging incoming requests 
+    logger.log('info', {
+        message: 'Incoming Request',
+        method: clientReq.method,
+        url: clientReq.url,
+        headers: clientReq.headers
+    });
 
     // Checks if a response exists before forwarding.
     if (cache.has(clientReq.url)) {
-        console.log(`Cache hit: ${clientReq.url}`);
+        // logging cache info
+        logger.info({
+            message: 'Cache Hit',
+            url: clientReq.url
+        });
         const cachedData = cache.get(clientReq.url);
         clientRes.writeHead(200, cachedData.headers);
         return clientRes.end(cachedData.body);  // 
@@ -16,7 +65,7 @@ const server = http.createServer((clientReq, clientRes) => {
 
 
     const options = {
-        hostname: "example.com", // main seerver 
+        hostname: "example.com", // main server 
         port: 80,
         path: clientReq.url,  // Use the client's requested path
         method: clientReq.method,
@@ -26,7 +75,12 @@ const server = http.createServer((clientReq, clientRes) => {
         }
     };
 
-    console.log('Forwarding request to example.com with path:', clientReq.url);
+    // console.log('Forwarding request to example.com with path:', clientReq.url);
+    // console.log('Full Incomming request details:', {
+    //     url: clientReq.url,
+    //     method: clientReq.method,
+    //     headers: clientReq.headers
+    // });
 
     const proxyReq = http.request(options, (proxyRes) => {
         let chunks = []  // array for both binary and text based data 
@@ -45,7 +99,12 @@ const server = http.createServer((clientReq, clientRes) => {
     });
 
     proxyReq.on("error", (err) => {
-        console.error("Proxy request error:", err);
+        // logging the errors 
+        logger.error({
+            message: 'Proxy Request Error',
+            error: err.message,
+            url: clientReq.url
+        });
         clientRes.writeHead(500, { "Content-Type": "text/plain" });
         clientRes.end(`Internal Server Error: ${err.message}`);
     });
