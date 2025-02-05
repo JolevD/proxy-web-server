@@ -50,18 +50,33 @@ const server = http.createServer((clientReq, clientRes) => {
         headers: clientReq.headers
     });
 
+    // timeout for request 
+    const requestTimeout = setTimeout(() => {
+        clientRes.writeHead(504, { "content-type": 'text/plain' })
+        clientRes.end("Gateway Timeout")
+    }, 10000);
+
     // Checks if a response exists before forwarding.
-    if (cache.has(clientReq.url)) {
-        // logging cache info
-        logger.info({
-            message: 'Cache Hit',
-            url: clientReq.url
-        });
-        const cachedData = cache.get(clientReq.url);
-        clientRes.writeHead(200, cachedData.headers);
-        return clientRes.end(cachedData.body);  // 
+
+    try {
+        if (cache.has(clientReq.url)) {
+            clearTimeout(requestTimeout)
+            // logging cache info
+            logger.info({
+                message: 'Cache Hit',
+                url: clientReq.url
+            });
+            const cachedData = cache.get(clientReq.url);
+            clientRes.writeHead(200, cachedData.headers);
+            return clientRes.end(cachedData.body);  // 
+        }
+        console.log(`Cache miss: ${clientReq.url}, fetching from example.com...`);
+
+    } catch (error) {
+        clearTimeout(requestTimeout)
+        console.log(error)
     }
-    console.log(`Cache miss: ${clientReq.url}, fetching from example.com...`);
+
 
 
     const options = {
