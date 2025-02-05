@@ -42,6 +42,8 @@ const options = {
 const cache = new LRUCache(options) // Stores cached responses in memory.
 
 const server = http.createServer((clientReq, clientRes) => {
+    let isRequestClosed = false ///////////////////ai
+
     // logging incoming requests 
     logger.log('info', {
         message: 'Incoming Request',
@@ -50,81 +52,118 @@ const server = http.createServer((clientReq, clientRes) => {
         headers: clientReq.headers
     });
 
+
     // timeout for request 
     const requestTimeout = setTimeout(() => {
-        clientRes.writeHead(504, { "content-type": 'text/plain' })
-        clientRes.end("Gateway Timeout")
+        clientRes.writeHead(504, { "content-type": 'text/plain' });
+        clientRes.end("Gateway Timeout");
+
     }, 10000);
+
+    const cleanupRequest = (shouldClearTimeout = true) => {
+        if (shouldClearTimeout) {
+            clearTimeout(requestTimeout);
+        }
+    };
+
+    // Ensures timeout is cleared on response finish /////////////////ai
+    clientRes.on('finish', () => {
+        clearTimeout(requestTimeout);
+    });
+    //   // Clean up on request close ///////////////////////////ai
+    //   clientReq.on('close', () => {
+    //     cleanupRequest();
+    //     isRequestClosed = true;
+    // });
+
 
     // Checks if a response exists before forwarding.
 
     try {
         if (cache.has(clientReq.url)) {
-            clearTimeout(requestTimeout)
+
+
             // logging cache info
             logger.info({
                 message: 'Cache Hit',
                 url: clientReq.url
             });
             const cachedData = cache.get(clientReq.url);
+            cleanupRequest()
             clientRes.writeHead(200, cachedData.headers);
-            return clientRes.end(cachedData.body);  // 
+            return clientRes.end(cachedData.body);  //
+
         }
         console.log(`Cache miss: ${clientReq.url}, fetching from example.com...`);
 
-    } catch (error) {
-        clearTimeout(requestTimeout)
-        console.log(error)
-    }
+        //proxy request options 
+        const options = {
+            hostname: "example.com", // main server 
+            port: 80,
+            path: clientReq.url,  // Use the client's requested path
+            method: clientReq.method,
+            headers: {
+                ...clientReq.headers,
+                'host': 'example.com'  // Override the host header i.e. -> if we donot do this then the clientreq will send localhost as the header, which the main server will not recognise 
+            }
+        };
 
+        // console.log('Forwarding request to example.com with path:', clientReq.url);
+        // console.log('Full Incomming request details:', {
+        //     url: clientReq.url,
+        //     method: clientReq.method,
+        //     headers: clientReq.headers
+        // });
 
+        const proxyReq = http.request(options, (proxyRes) => {
+            let chunks = []  // array for both binary and text based data 
 
-    const options = {
-        hostname: "example.com", // main server 
-        port: 80,
-        path: clientReq.url,  // Use the client's requested path
-        method: clientReq.method,
-        headers: {
-            ...clientReq.headers,
-            'host': 'example.com'  // Override the host header i.e. -> if we donot do this then the clientreq will send localhost as the header, which the main server will not recognise 
-        }
-    };
+            proxyRes.on('data', (chunk) => chunks.push(chunk)) // collect chunks of data in cache 
 
-    // console.log('Forwarding request to example.com with path:', clientReq.url);
-    // console.log('Full Incomming request details:', {
-    //     url: clientReq.url,
-    //     method: clientReq.method,
-    //     headers: clientReq.headers
-    // });
+            proxyRes.on("end", () => {
+                const body = Buffer.concat(chunks) // mergs chunks into single buffer
 
-    const proxyReq = http.request(options, (proxyRes) => {
-        let chunks = []  // array for both binary and text based data 
+                cache.set(clientReq.url, { body, headers: proxyRes.headers }) // Cache the response (store both body and headers), adds a new cached response 
+                console.log(`Got response: ${proxyRes.statusCode}`);
+                cleanupRequest()
 
-        proxyRes.on('data', (chunk) => chunks.push(chunk)) // collect chunks of data in cache 
+                clientRes.writeHead(proxyRes.statusCode, proxyRes.headers);
+                clientRes.end(body)
+            }
+            )
 
-        proxyRes.on("end", () => {
-            const body = Buffer.concat(chunks) // mergs chunks into single buffer
-
-            cache.set(clientReq.url, { body, headers: proxyRes.headers }) // Cache the response (store both body and headers), adds a new cached response 
-            console.log(`Got response: ${proxyRes.statusCode}`);
-            clientRes.writeHead(proxyRes.statusCode, proxyRes.headers);
-            clientRes.end(body)
-        })
-
-    });
-
-    proxyReq.on("error", (err) => {
-        // logging the errors 
-        logger.error({
-            message: 'Proxy Request Error',
-            error: err.message,
-            url: clientReq.url
         });
-        clientRes.writeHead(500, { "Content-Type": "text/plain" });
-        clientRes.end(`Internal Server Error: ${err.message}`);
-    });
 
-    proxyReq.end();
+        proxyReq.on("error", (err) => {
+            // logging the errors 
+            logger.error({
+                message: 'Proxy Request Error',
+                error: err.message,
+                url: clientReq.url
+            });
+            cleanupRequest()
+            clientRes.writeHead(500, { "Content-Type": "text/plain" });
+            clientRes.end(`Internal Server Error: ${err.message}`);
+        });
+
+        proxyReq.end();
+
+
+
+    } catch (error) {
+        if (!isRequestClosed) {
+            clearTimeout(requestTimeout);
+            logger.error({
+                message: 'Cache Error',
+                error: error.message,
+                url: clientReq.url
+            });
+            cleanupRequest()
+            clientRes.writeHead(500, { "Content-Type": "text/plain" });
+            clientRes.end(`Internal Server Error: ${error.message}`);
+
+        }
+    }
 });
 
 
