@@ -1,7 +1,15 @@
 import https from "https"
 import http from "http"
+import fs from "fs"
 import { LRUCache } from "lru-cache"
 import { createLogger, format, transports } from "winston"
+
+
+// Loading SSL key and certificate
+const sslOptions = {
+    key: fs.readFileSync('server.key'),
+    certificate: fs.readFileSync('server.cert')
+};
 
 const logger = createLogger({
     // defining logs
@@ -41,7 +49,7 @@ const options = {
 
 const cache = new LRUCache(options) // Stores cached responses in memory.
 
-const server = http.createServer((clientReq, clientRes) => {
+const server = https.createServer(sslOptions, (clientReq, clientRes) => {
     let isRequestClosed = false ///////////////////ai
 
     // logging incoming requests 
@@ -99,7 +107,7 @@ const server = http.createServer((clientReq, clientRes) => {
         //proxy request options 
         const options = {
             hostname: "example.com", // main server 
-            port: 80,
+            port: 443,
             path: clientReq.url,  // Use the client's requested path
             method: clientReq.method,
             headers: {
@@ -115,7 +123,7 @@ const server = http.createServer((clientReq, clientRes) => {
         //     headers: clientReq.headers
         // });
 
-        const proxyReq = http.request(options, (proxyRes) => {
+        const proxyReq = https.request(options, (proxyRes) => {
             let chunks = []  // array for both binary and text based data 
 
             proxyRes.on('data', (chunk) => chunks.push(chunk)) // collect chunks of data in cache 

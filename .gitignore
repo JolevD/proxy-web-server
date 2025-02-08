@@ -3,3 +3,5 @@ cServer.js
 proxy-server.log
 node_modules
 .gitignore
+server.cert
+server.key
