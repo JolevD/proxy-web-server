@@ -1,14 +1,14 @@
 import https from "https"
-import http from "http"
 import fs from "fs"
 import { LRUCache } from "lru-cache"
 import { createLogger, format, transports } from "winston"
+import { Semaphore } from "async-mutex"
 
 
 // Loading SSL key and certificate
 const sslOptions = {
     key: fs.readFileSync('server.key'),
-    certificate: fs.readFileSync('server.cert')
+    cert: fs.readFileSync('server.cert')
 };
 
 const logger = createLogger({
@@ -39,20 +39,23 @@ const logger = createLogger({
 })
 
 
-const options = {
+const cacheOptions = {
     max: 100,            // Maximum number of items in the cache
     maxSize: 200 * 1024, // Maximum total size (in bytes)
     sizeCalculation: (value, key) => {
-        return value.body.length; // Use the length of the body for size calculations
+        return Buffer.byteLength(value.body); // Use the length of the body for size calculations
     }
 }
 
-const cache = new LRUCache(options) // Stores cached responses in memory.
+const cache = new LRUCache(cacheOptions) // Stores cached responses in memory.
 
-const server = https.createServer(sslOptions, (clientReq, clientRes) => {
-    let isRequestClosed = false ///////////////////ai
+const MAX_CONCURRENT_CONNECTIONS = 400;  // 400 max clients 
+const connectionSemaphore = new Semaphore(MAX_CONCURRENT_CONNECTIONS);
 
-    // logging incoming requests 
+
+const server = https.createServer(sslOptions, async (clientReq, clientRes) => {
+
+    // logging incoming requests
     logger.log('info', {
         message: 'Incoming Request',
         method: clientReq.method,
@@ -78,18 +81,13 @@ const server = https.createServer(sslOptions, (clientReq, clientRes) => {
     clientRes.on('finish', () => {
         clearTimeout(requestTimeout);
     });
-    //   // Clean up on request close ///////////////////////////ai
-    //   clientReq.on('close', () => {
-    //     cleanupRequest();
-    //     isRequestClosed = true;
-    // });
-
 
     // Checks if a response exists before forwarding.
 
+    const release = await connectionSemaphore.acquire()
+
     try {
         if (cache.has(clientReq.url)) {
-
 
             // logging cache info
             logger.info({
@@ -124,22 +122,49 @@ const server = https.createServer(sslOptions, (clientReq, clientRes) => {
         // });
 
         const proxyReq = https.request(options, (proxyRes) => {
-            let chunks = []  // array for both binary and text based data 
 
-            proxyRes.on('data', (chunk) => chunks.push(chunk)) // collect chunks of data in cache 
+            let MAX_SIZE = 5 * 1024 * 1024 // 5MB
+            clientRes.writeHead(proxyRes.statusCode, proxyRes.headers) // checking for header length before caching 
 
-            proxyRes.on("end", () => {
-                const body = Buffer.concat(chunks) // mergs chunks into single buffer
+            proxyRes.pipe(clientRes) // direct piping the response without storing 
+            const headerLength = proxyRes.headers['content-length']
 
-                cache.set(clientReq.url, { body, headers: proxyRes.headers }) // Cache the response (store both body and headers), adds a new cached response 
-                console.log(`Got response: ${proxyRes.statusCode}`);
-                cleanupRequest()
+            if (parseInt(headerLength || 0) <= MAX_SIZE) {
+                let chunks = []  // array for both binary and text based data 
+                let totalSize = 0 // incoming req cache size 
 
-                clientRes.writeHead(proxyRes.statusCode, proxyRes.headers);
-                clientRes.end(body)
+                proxyRes.on('data', (chunk) => {
+
+                    totalSize += chunk.length
+                    //store chunks if we haven't exceeded size limit
+                    if (totalSize <= MAX_SIZE) {
+                        chunks.push(chunk)
+                    } else {
+                        logger.info({
+                            message: 'Response is too large for caching',
+                            url: clientReq.url,
+                            size: totalSize
+                        })
+                        chunks.length = 0 // clearing chunks 
+                    }
+                }) // collect chunks of data in cache 
+
+                proxyRes.on("end", () => {
+                    if (chunks.length > 0) {
+                        const body = Buffer.concat(chunks) // mergs chunks into single buffer
+                        cache.set(clientReq.url, { body, headers: proxyRes.headers }) // Cache the response (store both body and headers), adds a new cached response 
+                        console.log(`Got cached response: ${proxyRes.statusCode}`)
+                    }
+                    cleanupRequest()
+                })
+            } else {
+                logger.info({
+                    message: 'Response too large for caching (based on headers)',
+                    url: clientReq.url,
+                    size: headerLength
+                });
+                cleanupRequest();
             }
-            )
-
         });
 
         proxyReq.on("error", (err) => {
@@ -150,6 +175,7 @@ const server = https.createServer(sslOptions, (clientReq, clientRes) => {
                 url: clientReq.url
             });
             cleanupRequest()
+
             clientRes.writeHead(500, { "Content-Type": "text/plain" });
             clientRes.end(`Internal Server Error: ${err.message}`);
         });
@@ -172,6 +198,16 @@ const server = https.createServer(sslOptions, (clientReq, clientRes) => {
 
         }
     }
+    finally {
+        release
+    }
+})
+
+server.on('error', (err) => {
+    logger.error({
+        message: 'Server Error',
+        error: err.message
+    });
 });
 
 
