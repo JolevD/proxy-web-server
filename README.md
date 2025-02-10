@@ -1,27 +1,36 @@
-# Node.js Proxy Server with Caching
+# Node.js HTTPS Proxy Server with Caching
 
-A simple proxy server built in Node.js that forwards client requests to an upstream server (e.g., example.com) and caches responses using an LRU cache. It also implements logging and request timeouts to improve reliability and performance.
+A secure, high-performance proxy server built in Node.js that forwards client requests to upstream servers, implements dynamic routing based on the Host header, and caches responses using an LRU cache. It supports HTTPS for both incoming client connections and connections to upstream servers, incorporates robust error handling with detailed logging, and limits concurrent connections using a semaphore.
 
 ## Overview
 
-This project implements a basic proxy server that:
-
-- Listens for incoming HTTP requests on a specified port (default: 8081).
-- Forwards requests to an upstream server (e.g., example.com) with appropriate header modifications.
-- Caches responses using an LRU (Least Recently Used) cache to improve response times on subsequent requests.
-- Logs incoming requests, cache hits, and errors using the Winston logging library.
-- Implements a timeout mechanism to return a "Gateway Timeout" error if the upstream server does not respond within 10 seconds.
+This project is a Node.js-based proxy server designed to demonstrate key networking concepts such as secure HTTPS communication, dynamic request forwarding, response caching with an LRU strategy, and robust error handling. The server supports multiple upstream domains by dynamically mapping the Host header and uses a composite cache key to ensure correct caching behavior. It also limits the number of concurrent connections via a semaphore and logs all activities with Winston.
 
 ## Features
 
-- **Request Forwarding:**  
-  Receives a client request and forwards it to the configured upstream server.
+- **Secure Connections:**
 
-- **Caching:**  
-  Uses an LRU cache (with the `lru-cache` package) to store and retrieve responses. Cached responses include both the response body and headers.
+  - Incoming connections use HTTPS with a self-signed (or CA-issued) certificate.
+  - Outgoing (upstream) requests use HTTPS, ensuring end-to-end encryption.
 
-- **Logging:**  
-  Logs are managed with Winston, outputting to both a log file (`proxy-server.log`) and the console. Logs include details such as method, URL, headers, and timestamps.
+- **Dynamic Routing:**
 
-- **Timeouts:**  
-  Each request has a 10-second timeout. If the upstream server does not respond within this period, the server returns a 504 "Gateway Timeout" error.
+  - The proxy determines the target upstream server based on the client's Host header.
+  - A composite cache key (`<targetHost><clientReq.url>`) ensures correct cache isolation between domains.
+
+- **Caching with LRU Strategy:**
+
+  - Uses the `lru-cache` library to cache responses for faster subsequent requests.
+  - Caches responses only if they are below a specified size threshold (e.g., 5MB).
+  - Bypasses caching for large responses while still streaming them to the client.
+
+- **Error Handling & Timeouts:**
+  - Implements a 10-second timeout for each request, returning a 504 Gateway Timeout if the upstream server is too slow.
+  - Handles errors on the upstream connection, client streams, and caching logic, sending appropriate HTTP error responses (e.g., 400, 500).
+- **Logging:**
+
+  - Uses Winston for structured logging to both a file (`proxy-server.log`) and the console.
+  - Logs incoming requests, cache hits/misses, errors, and other events with detailed context.
+
+- **Concurrency Control:**
+  - Limits concurrent client connections (e.g., up to 400) using a semaphore from the `async-mutex` library.

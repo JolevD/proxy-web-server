@@ -14,10 +14,9 @@ const sslOptions = {
 const logger = createLogger({
     // defining logs
     level: "info",
-
     format: format.combine(
         format.timestamp({ format: "YYYY-MM-DD HH:mm:ss" }), // tells the time of the log
-        format.json(), // tells the log
+        format.json(),
         format.prettyPrint()
     ),
 
@@ -66,10 +65,11 @@ const server = https.createServer(sslOptions, async (clientReq, clientRes) => {
 
     // timeout for request 
     const requestTimeout = setTimeout(() => {
-        clientRes.writeHead(504, { "content-type": 'text/plain' });
-        clientRes.end("Gateway Timeout");
-
-    }, 10000);
+        if (!clientRes.headersSent) {
+            clientRes.writeHead(504, { "content-type": 'text/plain' });
+            clientRes.end("Gateway Timeout");
+        }
+    }, 10000)
 
     const cleanupRequest = (shouldClearTimeout = true) => {
         if (shouldClearTimeout) {
@@ -84,52 +84,70 @@ const server = https.createServer(sslOptions, async (clientReq, clientRes) => {
 
     // Checks if a response exists before forwarding.
 
-    const release = await connectionSemaphore.acquire()
+    const [value, release] = await connectionSemaphore.acquire()
 
     try {
-        if (cache.has(clientReq.url)) {
+        // If the request comes in to localhost (for development), override with the upstream server.
+        const clientHost = clientReq.headers.host;
+        let targetHost = "example.com"; // default upstream host
+
+        // Optionally, use a mapping function if you have multiple domains.
+        if (clientHost && !clientHost.includes("localhost")) {
+            targetHost = clientHost;
+        }
+
+        const cacheKey = `${targetHost}${clientReq.url}`
+
+        logger.info({
+            message: `Cache lookup for ${cacheKey}`,
+            url: clientReq.url
+        });
+
+        if (cache.has(cacheKey)) {
 
             // logging cache info
             logger.info({
                 message: 'Cache Hit',
                 url: clientReq.url
             });
-            const cachedData = cache.get(clientReq.url);
+            const cachedData = cache.get(cacheKey);
             cleanupRequest()
             clientRes.writeHead(200, cachedData.headers);
-            return clientRes.end(cachedData.body);  //
+            return clientRes.end(cachedData.body);  // Early return when cache hit
 
         }
-        console.log(`Cache miss: ${clientReq.url}, fetching from example.com...`);
 
+        console.log(`Cache miss: ${clientReq.url}, fetching ${clientHost}`);
         //proxy request options 
-        const options = {
-            hostname: "example.com", // main server 
+        const upstreamOptions = {
+            hostname: targetHost, // main server 
             port: 443,
             path: clientReq.url,  // Use the client's requested path
             method: clientReq.method,
             headers: {
                 ...clientReq.headers,
-                'host': 'example.com'  // Override the host header i.e. -> if we donot do this then the clientreq will send localhost as the header, which the main server will not recognise 
+                'host': targetHost // Override the host header i.e. -> if we donot do this then the clientreq will send localhost as the header, which the main server will not recognise 
             }
         };
 
-        // console.log('Forwarding request to example.com with path:', clientReq.url);
-        // console.log('Full Incomming request details:', {
-        //     url: clientReq.url,
-        //     method: clientReq.method,
-        //     headers: clientReq.headers
-        // });
-
-        const proxyReq = https.request(options, (proxyRes) => {
+        const proxyReq = https.request(upstreamOptions, (proxyRes) => {
 
             let MAX_SIZE = 5 * 1024 * 1024 // 5MB
-            clientRes.writeHead(proxyRes.statusCode, proxyRes.headers) // checking for header length before caching 
 
-            proxyRes.pipe(clientRes) // direct piping the response without storing 
-            const headerLength = proxyRes.headers['content-length']
+            const headerLength = parseInt(proxyRes.headers['content-length'] || '0')
 
-            if (parseInt(headerLength || 0) <= MAX_SIZE) {
+            if (headerLength && headerLength > MAX_SIZE) {
+                logger.info({
+                    message: 'Response too large for caching (based on headers)',
+                    url: clientReq.url,
+                    size: headerLength
+                });
+                cleanupRequest();
+                clientRes.writeHead(proxyRes.statusCode, proxyRes.headers);
+                return proxyRes.pipe(clientRes);
+            }
+
+            if (headerLength <= MAX_SIZE) {
                 let chunks = []  // array for both binary and text based data 
                 let totalSize = 0 // incoming req cache size 
 
@@ -150,12 +168,18 @@ const server = https.createServer(sslOptions, async (clientReq, clientRes) => {
                 }) // collect chunks of data in cache 
 
                 proxyRes.on("end", () => {
+                    cleanupRequest()
+                    clientRes.writeHead(proxyRes.statusCode, proxyRes.headers);
+
                     if (chunks.length > 0) {
                         const body = Buffer.concat(chunks) // mergs chunks into single buffer
-                        cache.set(clientReq.url, { body, headers: proxyRes.headers }) // Cache the response (store both body and headers), adds a new cached response 
-                        console.log(`Got cached response: ${proxyRes.statusCode}`)
+                        cache.set(cacheKey, { body, headers: proxyRes.headers }) // Cache the response (store both body and headers), adds a new cached response 
+                        logger.info({ message: `Got cached response: ${proxyRes.statusCode}`, url: clientReq.url })
+                        clientRes.end(body)
+                    } else {
+                        clientRes.end()
                     }
-                    cleanupRequest()
+
                 })
             } else {
                 logger.info({
@@ -176,7 +200,9 @@ const server = https.createServer(sslOptions, async (clientReq, clientRes) => {
             });
             cleanupRequest()
 
-            clientRes.writeHead(500, { "Content-Type": "text/plain" });
+            if (!clientRes.headersSent) {
+                clientRes.writeHead(500, { "Content-Type": "text/plain" });
+            }
             clientRes.end(`Internal Server Error: ${err.message}`);
         });
 
@@ -185,21 +211,19 @@ const server = https.createServer(sslOptions, async (clientReq, clientRes) => {
 
 
     } catch (error) {
-        if (!isRequestClosed) {
-            clearTimeout(requestTimeout);
-            logger.error({
-                message: 'Cache Error',
-                error: error.message,
-                url: clientReq.url
-            });
-            cleanupRequest()
+        cleanupRequest();
+        logger.error({
+            message: 'Cache Error',
+            error: error.message,
+            url: clientReq.url
+        });
+        if (!clientRes.headersSent) {
             clientRes.writeHead(500, { "Content-Type": "text/plain" });
-            clientRes.end(`Internal Server Error: ${error.message}`);
-
         }
+        clientRes.end(`Internal Server Error: ${error.message}`)
     }
     finally {
-        release
+        release()
     }
 })
 
