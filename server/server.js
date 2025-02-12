@@ -103,7 +103,7 @@ const server = https.createServer(sslOptions, async (clientReq, clientRes) => {
             url: clientReq.url
         });
 
-        if (cache.has(cacheKey)) {
+        if (clientReq.method === 'GET' && cache.has(cacheKey)) {
 
             // logging cache info
             logger.info({
@@ -176,6 +176,7 @@ const server = https.createServer(sslOptions, async (clientReq, clientRes) => {
                         cache.set(cacheKey, { body, headers: proxyRes.headers }) // Cache the response (store both body and headers), adds a new cached response 
                         logger.info({ message: `Got cached response: ${proxyRes.statusCode}`, url: clientReq.url })
                         clientRes.end(body)
+                        chunks = null
                     } else {
                         clientRes.end()
                     }
